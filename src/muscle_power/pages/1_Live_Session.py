@@ -409,13 +409,14 @@ with st.sidebar:
                             "and the sensor is powered on and within 5 m."
                             + (f"\\n\\nDetails: {_err_detail}" if _err_detail else "")
                         )
+            # --- Find the selection logic in 1_Live_Session.py ---
 
             found: list[SensorInfoDTO] = st.session_state.found_sensors
             if found:
                 def _device_label(d: SensorInfoDTO) -> str:
-                    # FIX: Check if "Callibri" is in the name string as a backup
-                    valid_callibri = d.is_callibri or "Callibri" in d.name
-                    tag = "" if valid_callibri else "    not a Callibri Sensor"
+                    # Check for "Callibri" in the name to handle "Callibri_Red"
+                    is_valid = d.is_callibri or "Callibri" in d.name
+                    tag = "" if is_valid else "    not a Callibri Sensor"
                     return f"{d.name} ({d.address}){tag}"
 
                 sensor_labels = [_device_label(d) for d in found]
@@ -429,31 +430,38 @@ with st.sidebar:
                 st.session_state.selected_sensor_idx = idx
                 selected_device = found[idx]
 
-                # FIX: Update the check here as well to allow the "Connect" button to appear
+                # Use the same flexible check here
                 is_valid_selection = selected_device.is_callibri or "Callibri" in selected_device.name
 
                 if not is_valid_selection:
                     st.warning("Selected device is not a Callibri sensor.", icon="⚠️")
                 else:
                     if st.button(" Connect", use_container_width=True):
-                     # ... rest of your connection logic ...
+                        # The svc._scanner returns raw SDK objects which use PascalCase
                         raw_sensors = getattr(svc._scanner, "sensors", lambda: [])()
-                        # 'r' is the raw SDK object, so it uses 'Address'
+            
+                        # FIX: Use .Address (capital A) to match the SDK's raw object
                         matching = [r for r in raw_sensors if r.Address == selected_device.address]
+            
                         if matching:
-                            with st.spinner("Connecting"):
+                            with st.spinner("Connecting..."):
                                 try:
                                     with ThreadPoolExecutor() as ex:
                                         fut = ex.submit(svc.connect, matching[0])
                                         fut.result(timeout=30)
+                        
+                                    # Set initial high-sensitivity for EMG
+                                    svc.set_emg_defaults() 
+                        
                                     st.session_state["sensor_state"] = svc.state
                                     st.session_state["battery_pct"] = svc.battery
-                                    toast_success(f"Connected to {svc.sensor_info.name if svc.sensor_info else 'sensor'}")
+                                    st.toast(f"Connected to {selected_device.name}", icon="✅")
                                     st.rerun()
-                                except SensorConnectionError as exc:
-                                    show_error_card(str(exc))
+                                except Exception as exc:
+                                    st.error(f"Connection failed: {exc}")
                         else:
-                            show_error_card("Raw sensor object not found  please re-scan.")
+                            st.error("Raw sensor object not found. Please re-scan.")
+
 
         elif svc.state == "connected":
             if st.button(" Disconnect", use_container_width=True):

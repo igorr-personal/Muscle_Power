@@ -612,31 +612,34 @@ class CallibriService:
     # ------------------------------------------------------------------
     # Signal streaming
     # ------------------------------------------------------------------
+    def set_emg_defaults(self):
+        """Sets the sensor to 1000Hz and max gain for best sEMG results."""
+        if not self._sensor: return
+        
+        # Accessing SDK methods using PascalCase
+        self._sensor.SetSamplingFrequency(SamplingFrequency.FrequencyHz1000)
+        self._sensor.SetGain(SensorGain.Gain12) 
+        self._sensor.SetDataOffset(SensorDataOffset.DataOffset3)
 
     def start_streaming(self, session_start_ms: int | None = None) -> None:
-        """Subscribe to signal + envelope callbacks and start acquisition."""
         if not self._sensor or self._state != "connected":
-            raise SensorConnectionError("Sensor is not connected.")
+            raise Exception("Sensor not connected")
+
         self._session_start_ms = session_start_ms or int(time.time() * 1000)
-        self._raw_buffer.clear()
-        self._envelope_buffer.clear()
-
-
         sensor = self._sensor
-        if sensor.IsSupportedFeature(SensorFeature.Signal): # Note PascalCase
-            # The SDK docs specify these exact names:
+
+        # Registering with the correct 'callibri' prefix required by the SDK
+        if sensor.IsSupportedFeature(SensorFeature.Signal):
             sensor.callibriElectrodeStateChanged = self._on_electrode_state
             sensor.callibriSignalDataReceived = self._on_signal_data
             
         if sensor.IsSupportedFeature(SensorFeature.Envelope):
             sensor.callibriEnvelopeDataReceived = self._on_envelope_data
 
+        # Execute start commands using PascalCase
+        if sensor.IsSupportedCommand(SensorCommand.StartSignal):
+            sensor.ExecCommand(SensorCommand.StartSignal)
 
-        if sensor.is_supported_command(SensorCommand.StartSignal):
-            sensor.exec_command(SensorCommand.StartSignal)
-        if sensor.is_supported_command(SensorCommand.StartEnvelope):
-            sensor.exec_command(SensorCommand.StartEnvelope)
-        log_action(_log, "streaming_started")
 
     def stop_streaming(self) -> None:
         """Stop signal acquisition."""
