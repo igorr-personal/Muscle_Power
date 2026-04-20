@@ -765,8 +765,27 @@ class CallibriService:
         elif battery <= 20:
             _log.info("Sensor battery low: %d%%", battery)
 
-    def _on_electrode_state(self, sensor: Any, state: Any) -> None:
-        self._electrode_state = str(state)
+    def _on_electrode_state(self, sensor, state):
+    # Mapping based on Callibri SDK standards
+    # 0 = Unknown/Initializing
+    # 1 = Normal (Contact is good!)
+    # 2 = HighResistance (Contact is poor)
+    # 3 = Detached (No contact)
+    
+    # Extract the raw integer value from the SDK object
+    val = getattr(state, "value", state)
+    
+    mapping = {
+        0: "Initializing",
+        1: "Normal",
+        2: "High Resistance",
+        3: "Detached"
+    }
+    
+    self._last_electrode_state = mapping.get(val, "Unknown")
+    print(f"DEBUG: Sensor {sensor.Address} contact: {self._last_electrode_state}")
+
+
 
 
 # ---------------------------------------------------------------------------
