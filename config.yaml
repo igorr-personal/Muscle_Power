@@ -1,0 +1,33 @@
+# Muscle Power — Application Configuration
+
+app:
+  env: development
+  log_level: INFO
+  debug: false
+
+cache:
+  ttl_minutes: 60
+  max_size_mb: 500
+
+database:
+  url: sqlite:///muscle_power.db
+
+sensor:
+  preferred_address: ""          # leave blank to pick first found
+  sampling_frequency: 250        # Hz: 125 | 250 | 500 | 1000 | 2000
+  signal_type: EMG               # EMG | EEG | ECG
+  display_window_seconds: 5
+  rms_window_ms: 200
+  battery_warn_pct: 20
+  battery_alert_pct: 10
+  battery_autosave_pct: 5
+
+session:
+  min_duration_seconds: 30       # shorter sessions flagged as accidental
+
+kb:
+  enabled: false                 # set true and install [kb] extras to enable RAG
+  documents_dir: documents
+  index_dir: kb_data
+  embedding_model: all-mpnet-base-v2
+  top_k: 5
