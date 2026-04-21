@@ -616,10 +616,14 @@ class CallibriService:
         """Sets the sensor to 1000Hz and max gain for best sEMG results."""
         if not self._sensor: return
         
-        # Accessing SDK methods using PascalCase
-        self._sensor.SetSamplingFrequency(SamplingFrequency.FrequencyHz1000)
-        self._sensor.SetGain(SensorGain.Gain12) 
-        self._sensor.SetDataOffset(SensorDataOffset.DataOffset3)
+        # Force these settings for the integrated pads
+        sensor.SetSamplingFrequency(SamplingFrequency.FrequencyHz1000)
+        sensor.SetGain(SensorGain.Gain12) # Highest resolution
+        sensor.SetDataOffset(SensorDataOffset.DataOffset3)
+
+        # Double-check the Start command casing
+        if sensor.IsSupportedCommand(SensorCommand.StartSignal):
+            sensor.ExecCommand(SensorCommand.StartSignal)
 
     def start_streaming(self, session_start_ms: int | None = None) -> None:
         if not self._sensor or self._state != "connected":
@@ -723,24 +727,33 @@ class CallibriService:
     def _on_envelope_data(self, sensor: Any, data: Any) -> None:
         now_ms = int(time.time() * 1000)
         try:
+            # 'data' is typically a list of packets from the SDK
             for packet in data:
-                value = getattr(packet, "sample", None)
+                # 1. FIX: Use PascalCase "Sample" to match the SDK
+                value = getattr(packet, "Sample", None)
+            
+                # 2. Backup check for "Samples" list (also PascalCase)
                 if value is None:
-                    samples = getattr(packet, "samples", [])
+                    samples = getattr(packet, "Samples", [])
                     value = samples[0] if samples else None
+            
                 if value is None:
                     continue
+                
                 fval = float(value)
-                with self._lock:
-                    self._envelope_buffer.append(
-                        SignalSample(
-                            timestamp_ms=now_ms,
-                            raw_value=fval,
-                            envelope_value=fval,
-                        )
-                    )
-        except Exception as exc:
-            _log.warning("Envelope callback error: %s", exc)
+            
+                # 3. SAVE TO BUFFER: This is what the Streamlit chart reads
+                # We save the relative time (ms) and the float value
+                self._envelope_buffer.append({
+                    "t": now_ms - self._session_start_ms, 
+                    "v": fval
+                })
+            
+            # Optional: Debug print to see if numbers are moving in the terminal
+            # print(f"DEBUG: Envelope value received: {fval}")
+
+        except Exception as e:
+            print(f"Error in envelope callback: {e}")
 
     def _on_state_changed(self, sensor: Any, state: Any) -> None:
         state_str = str(state)

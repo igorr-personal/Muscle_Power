@@ -1,6 +1,10 @@
 """Live Session page  real-time EMG acquisition and oscilloscope display."""
 from __future__ import annotations
 
+import streamlit as st
+import time
+from streamlit_autorefresh import st_autorefresh  # <--- Add this here
+
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -462,8 +466,26 @@ with st.sidebar:
                         else:
                             st.error("Raw sensor object not found. Please re-scan.")
 
-
+        # --- Find this line around line 465 ---
         elif svc.state == "connected":
+    
+            # 1. ADD THE REFRESH HEARTBEAT FIRST
+            # This forces the UI to update every 100ms so the chart moves
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=100, key="data_refresh")
+
+            # 2. ADD THE CHART LOGIC HERE
+            st.subheader("Live Muscle Power (Envelope)")
+    
+            if len(svc._envelope_buffer) > 0:
+                # We take the last 100 points for a smooth scrolling effect
+                # 'v' is the value we saved in the callback earlier
+                env_data = [sample['v'] for sample in list(svc._envelope_buffer)[-100:]]
+                st.area_chart(env_data)
+            else:
+                st.info("Waiting for data... Ensure you clicked 'Start' and the sensor has skin contact.")
+
+
             if st.button(" Disconnect", use_container_width=True):
                 if st.session_state.recording:
                     _raw = np.array([s.raw_value for s in svc.get_raw_samples()])
