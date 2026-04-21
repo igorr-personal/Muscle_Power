@@ -1,13 +1,14 @@
 """Live Session page  real-time EMG acquisition and oscilloscope display."""
-from __future__ import annotations
-
+from __future__ import annotations  # <--- MUST BE LINE 1
 import streamlit as st
+import sys
 import time
-
 from streamlit_autorefresh import st_autorefresh
 
+print(f"DEBUG: I am using this Python: {sys.executable}")
+
+
 import json
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
