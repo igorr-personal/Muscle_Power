@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import streamlit as st
 import time
-from streamlit_autorefresh import st_autorefresh  # <--- Add this here
+
+from streamlit_autorefresh import st_autorefresh
 
 import json
 import time
