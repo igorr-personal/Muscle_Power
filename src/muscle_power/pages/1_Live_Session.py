@@ -1,11 +1,13 @@
-"""Live Session page  real-time EMG acquisition and oscilloscope display."""
 from __future__ import annotations  # <--- MUST BE LINE 1
-import streamlit as st
+
 import sys
+print(f"==========================================")
+print(f"DEBUG: I am using this Python: {sys.executable}")
+print(f"==========================================")
+
+import streamlit as st
 import time
 from streamlit_autorefresh import st_autorefresh
-
-print(f"DEBUG: I am using this Python: {sys.executable}")
 
 
 import json
@@ -444,29 +446,21 @@ with st.sidebar:
                 else:
                     if st.button(" Connect", use_container_width=True):
                         # The svc._scanner returns raw SDK objects which use PascalCase
-                        raw_sensors = getattr(svc._scanner, "sensors", lambda: [])()
-            
-                        # FIX: Use .Address (capital A) to match the SDK's raw object
-                        matching = [r for r in raw_sensors if r.Address == selected_device.address]
-            
-                        if matching:
-                            with st.spinner("Connecting..."):
-                                try:
-                                    with ThreadPoolExecutor() as ex:
-                                        fut = ex.submit(svc.connect, matching[0])
-                                        fut.result(timeout=30)
-                        
-                                    # Set initial high-sensitivity for EMG
-                                    svc.set_emg_defaults() 
-                        
-                                    st.session_state["sensor_state"] = svc.state
-                                    st.session_state["battery_pct"] = svc.battery
-                                    st.toast(f"Connected to {selected_device.name}", icon="✅")
-                                    st.rerun()
-                                except Exception as exc:
-                                    st.error(f"Connection failed: {exc}")
-                        else:
-                            st.error("Raw sensor object not found. Please re-scan.")
+                         with st.spinner("Connecting... (this may take ~10 seconds)"):
+                            try:
+                                with ThreadPoolExecutor() as ex:
+                                    fut = ex.submit(
+                                        svc.connect_by_address,
+                                        selected_device.address
+                                    )
+                                    fut.result(timeout=60)
+                                svc.set_emg_defaults()
+                                st.session_state["sensor_state"] = svc.state
+                                st.session_state["battery_pct"] = svc.battery
+                                st.toast(f"Connected to {selected_device.name}", icon="✅")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Connection failed: {exc}")
 
         # --- Find this line around line 465 ---
         elif svc.state == "connected":
@@ -482,7 +476,8 @@ with st.sidebar:
             if len(svc._envelope_buffer) > 0:
                 # We take the last 100 points for a smooth scrolling effect
                 # 'v' is the value we saved in the callback earlier
-                env_data = [sample['v'] for sample in list(svc._envelope_buffer)[-100:]]
+                env_data = [s.envelope_value for s in list(svc._envelope_buffer)[-100:]
+                    if s.envelope_value is not None]
                 st.area_chart(env_data)
             else:
                 st.info("Waiting for data... Ensure you clicked 'Start' and the sensor has skin contact.")

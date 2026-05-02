@@ -25,6 +25,7 @@ if not exist ".venv" (
 :: Install/update dependencies
 echo [*] Installing dependencies...
 uv pip install -e ".[dev]"
+::uv pip install streamlit-autorefresh  <-- Add this line right here
 
 :: Check for .env file
 if not exist ".env" (
@@ -36,9 +37,9 @@ if not exist ".env" (
 
 :: Activate virtual environment and run
 echo [*] Starting Muscle Power...
-echo [*] Open your browser at http://localhost:8501
+echo [*] Open your browser at http://localhost:8503
 echo.
 call .venv\Scripts\activate.bat
-streamlit run src\muscle_power\main.py --server.port 8501
+streamlit run src\muscle_power\main.py --server.port 8503
 
 pause

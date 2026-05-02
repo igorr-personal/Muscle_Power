@@ -30,6 +30,9 @@ try:
         SensorFeature,
         SensorCommand,
         SensorParameter,
+        SensorGain,          # ← ADD
+        SamplingFrequency,   # ← ADD
+        SensorDataOffset,    # ← ADD
     )
 
     SDK_AVAILABLE = True
@@ -40,6 +43,9 @@ except ImportError:
     SensorFeature = None  # type: ignore[misc,assignment]
     SensorCommand = None  # type: ignore[misc,assignment]
     SensorParameter = None  # type: ignore[misc,assignment]
+    SensorGain = None        # ← ADD
+    SamplingFrequency = None # ← ADD
+    SensorDataOffset = None  # ← ADD
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -412,6 +418,7 @@ class CallibriService:
         self._on_disconnect_callbacks: list[Callable[[], None]] = []
         self._session_start_ms: int | None = None
         self._error_message: str = ""
+        self._raw_sensor_cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Properties
@@ -489,6 +496,8 @@ class CallibriService:
         """
         self._state = "scanning"
         self._error_message = ""
+        self._raw_sensor_cache: dict[str, Any] = {}
+        #self._raw_sensor_cache = {}
         log_action(_log, "ble_scan_all_start", {"timeout": timeout})
 
         seen_addrs: set[str] = set()
@@ -505,6 +514,7 @@ class CallibriService:
 
                 for s in callibri_scanner.sensors():
                     seen_addrs.add(s.address.upper())
+                    self._raw_sensor_cache[s.address.upper()] = s   # ← is this line here?
                     all_infos.append(
                         SensorInfoDTO(
                             name=s.name,
@@ -525,7 +535,8 @@ class CallibriService:
                     all_infos.append(dto)
         except Exception as exc:
             _log.warning("Bleak scan failed: %s", exc)
-            self._error_message = f"BLE scan error: {exc}"
+            if not all_infos:  # ← ADD THIS CONDITION
+                self._error_message = f"BLE scan error: {exc}"
 
         # --- Classic Bluetooth scan (Windows only) ---
         try:
@@ -545,6 +556,7 @@ class CallibriService:
             )
         else:
             self._state = "disconnected"
+            self._error_message = ""  # ← ADD THIS: clear any stale error message
 
         log_action(_log, "ble_scan_all_complete", {"total": len(all_infos)})
         return all_infos
@@ -552,6 +564,38 @@ class CallibriService:
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
+    def connect_by_address(self, address: str) -> None:
+        """Connect to a sensor by BLE address using a fresh scanner."""
+        if not SDK_AVAILABLE:
+            raise SDKNotInstalledError(
+                "Callibri SDK library not found. Please run: pip install pyneurosdk2"
+            )
+        self._state = "connecting"
+        self._error_message = ""
+        log_action(_log, "sensor_connect_by_address", {"address": address})
+        try:
+            scanner = Scanner([SensorFamily.LECallibri, SensorFamily.LEKolibri])
+            scanner.start()
+            time.sleep(5.0)
+            scanner.stop()
+            self._scanner = scanner
+            raw_list = [s for s in scanner.sensors() if s.address == address]
+            if not raw_list:
+                # try case-insensitive
+                raw_list = [s for s in scanner.sensors()
+                            if s.address.upper() == address.upper()]
+            if not raw_list:
+                self._state = "error"
+                self._error_message = f"Sensor {address} not found. Please ensure it is powered on."
+                raise SensorNotFoundError(self._error_message)
+            self.connect(raw_list[0])
+        except SensorNotFoundError:
+            raise
+        except Exception as exc:
+            self._state = "error"
+            self._error_message = f"Failed to connect: {exc}"
+            raise SensorConnectionError(self._error_message) from exc
+
 
     def connect(self, raw_sensor_info: Any) -> None:
         """Connect to a specific sensor (must be called in a background thread)."""
@@ -586,6 +630,7 @@ class CallibriService:
 
         sensor.sensorStateChanged = self._on_state_changed
         sensor.batteryChanged = self._on_battery_changed
+        sensor.callibriElectrodeStateChanged = self._on_electrode_state  # ← ADD THIS
         log_action(_log, "sensor_connected", {
             "name": sensor.name,
             "address": sensor.address,
@@ -612,18 +657,27 @@ class CallibriService:
     # ------------------------------------------------------------------
     # Signal streaming
     # ------------------------------------------------------------------
+    
     def set_emg_defaults(self):
-        """Sets the sensor to 1000Hz and max gain for best sEMG results."""
-        if not self._sensor: return
-        
-        # Force these settings for the integrated pads
-        sensor.SetSamplingFrequency(SamplingFrequency.FrequencyHz1000)
-        sensor.SetGain(SensorGain.Gain12) # Highest resolution
-        sensor.SetDataOffset(SensorDataOffset.DataOffset3)
+        if not self._sensor:
+            return
+        sensor = self._sensor
 
-        # Double-check the Start command casing
-        if sensor.IsSupportedCommand(SensorCommand.StartSignal):
-            sensor.ExecCommand(SensorCommand.StartSignal)
+        try:
+            sensor.sampling_frequency = SamplingFrequency.FrequencyHz1000
+        except Exception as exc:
+            _log.warning("Could not set sampling frequency: %s", exc)
+        try:
+            sensor.gain = SensorGain.Gain12
+        except Exception as exc:
+            _log.warning("Could not set gain: %s", exc)
+        try:
+            sensor.data_offset = SensorDataOffset.DataOffset3
+        except Exception as exc:
+            _log.warning("Could not set data offset: %s", exc)
+
+    #    if sensor.IsSupportedCommand(SensorCommand.StartSignal):
+    #        sensor.ExecCommand(SensorCommand.StartSignal)
 
     def start_streaming(self, session_start_ms: int | None = None) -> None:
         if not self._sensor or self._state != "connected":
@@ -633,16 +687,15 @@ class CallibriService:
         sensor = self._sensor
 
         # Registering with the correct 'callibri' prefix required by the SDK
-        if sensor.IsSupportedFeature(SensorFeature.Signal):
+        if sensor.is_supported_feature(SensorFeature.Signal):
             sensor.callibriElectrodeStateChanged = self._on_electrode_state
             sensor.callibriSignalDataReceived = self._on_signal_data
-            
-        if sensor.IsSupportedFeature(SensorFeature.Envelope):
+
+        if sensor.is_supported_feature(SensorFeature.Envelope):
             sensor.callibriEnvelopeDataReceived = self._on_envelope_data
 
-        # Execute start commands using PascalCase
-        if sensor.IsSupportedCommand(SensorCommand.StartSignal):
-            sensor.ExecCommand(SensorCommand.StartSignal)
+        if sensor.is_supported_command(SensorCommand.StartSignal):
+            sensor.exec_command(SensorCommand.StartSignal)
 
 
     def stop_streaming(self) -> None:
@@ -730,24 +783,23 @@ class CallibriService:
             # 'data' is typically a list of packets from the SDK
             for packet in data:
                 # 1. FIX: Use PascalCase "Sample" to match the SDK
-                value = getattr(packet, "Sample", None)
-            
-                # 2. Backup check for "Samples" list (also PascalCase)
+                value = getattr(packet, "sample", None)
                 if value is None:
-                    samples = getattr(packet, "Samples", [])
+                    samples = getattr(packet, "samples", [])
                     value = samples[0] if samples else None
-            
-                if value is None:
-                    continue
+
+
                 
                 fval = float(value)
             
                 # 3. SAVE TO BUFFER: This is what the Streamlit chart reads
                 # We save the relative time (ms) and the float value
-                self._envelope_buffer.append({
-                    "t": now_ms - self._session_start_ms, 
-                    "v": fval
-                })
+                with self._lock:
+                    self._envelope_buffer.append(SignalSample(
+                        timestamp_ms=now_ms,
+                        raw_value=0.0,
+                        envelope_value=fval,
+                    ))
             
             # Optional: Debug print to see if numbers are moving in the terminal
             # print(f"DEBUG: Envelope value received: {fval}")
@@ -779,24 +831,24 @@ class CallibriService:
             _log.info("Sensor battery low: %d%%", battery)
 
     def _on_electrode_state(self, sensor, state):
-    # Mapping based on Callibri SDK standards
-    # 0 = Unknown/Initializing
-    # 1 = Normal (Contact is good!)
-    # 2 = HighResistance (Contact is poor)
-    # 3 = Detached (No contact)
-    
-    # Extract the raw integer value from the SDK object
-    val = getattr(state, "value", state)
-    
-    mapping = {
-        0: "Initializing",
-        1: "Normal",
-        2: "High Resistance",
-        3: "Detached"
-    }
-    
-    self._last_electrode_state = mapping.get(val, "Unknown")
-    print(f"DEBUG: Sensor {sensor.Address} contact: {self._last_electrode_state}")
+        # Mapping based on Callibri SDK standards
+        # 0 = Unknown/Initializing
+        # 1 = Normal (Contact is good!)
+        # 2 = HighResistance (Contact is poor)
+        # 3 = Detached (No contact)
+
+        # Extract the raw integer value from the SDK object
+        val = getattr(state, "value", state)
+
+        mapping = {
+            0: "Initializing",
+            1: "Normal",
+            2: "High Resistance",
+            3: "Detached"
+        }
+
+        self._electrode_state = mapping.get(val, "Unknown")
+        _log.info("Electrode state: %s", self._electrode_state)
 
 
 
