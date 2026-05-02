@@ -25,27 +25,30 @@ _log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 try:
     from neurosdk.scanner import Scanner
+    SDK_AVAILABLE = True
+except ImportError:
+    SDK_AVAILABLE = False
+    Scanner = None
+
+try:
     from neurosdk.cmn_types import (  # type: ignore[import]
         SensorFamily,
         SensorFeature,
         SensorCommand,
         SensorParameter,
-        SensorGain,          # ← ADD
-        SamplingFrequency,   # ← ADD
-        SensorDataOffset,    # ← ADD
     )
-
-    SDK_AVAILABLE = True
 except ImportError:
-    SDK_AVAILABLE = False
-    Scanner = None  # type: ignore[misc,assignment]
-    SensorFamily = None  # type: ignore[misc,assignment]
-    SensorFeature = None  # type: ignore[misc,assignment]
-    SensorCommand = None  # type: ignore[misc,assignment]
-    SensorParameter = None  # type: ignore[misc,assignment]
-    SensorGain = None        # ← ADD
-    SamplingFrequency = None # ← ADD
-    SensorDataOffset = None  # ← ADD
+    SensorFamily = None
+    SensorFeature = None
+    SensorCommand = None
+    SensorParameter = None
+
+try:
+    from neurosdk.cmn_types import SensorGain, SamplingFrequency, SensorDataOffset
+except ImportError:
+    SensorGain = None
+    SamplingFrequency = None
+    SensorDataOffset = None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -476,9 +479,9 @@ class CallibriService:
 
         infos = [
             SensorInfoDTO(
-                name=s.name,
-                address=s.address,
-                rssi=getattr(s, "rssi", 0),
+                name=getattr(s, "name", None) or getattr(s, "Name", str(s)),
+                address=getattr(s, "address", None) or getattr(s, "Address", str(s)),
+                rssi=getattr(s, "rssi", getattr(s, "Rssi", 0)),
             )
             for s in self._scanner.sensors()
         ]
@@ -513,13 +516,21 @@ class CallibriService:
                 self._scanner = callibri_scanner
 
                 for s in callibri_scanner.sensors():
-                    seen_addrs.add(s.address.upper())
-                    self._raw_sensor_cache[s.address.upper()] = s   # ← is this line here?
+                    # SDK may use 'address' or 'Address' — find the right one
+                    addr = (
+                        getattr(s, "address", None)
+                        or getattr(s, "Address", None)
+                        or getattr(s, "serial_number", None)
+                        or str(s)
+                    )
+                    name = getattr(s, "name", None) or getattr(s, "Name", None) or str(s)
+                    seen_addrs.add(addr.upper())
+                    self._raw_sensor_cache[addr.upper()] = s
                     all_infos.append(
                         SensorInfoDTO(
-                            name=s.name,
-                            address=s.address,
-                            rssi=getattr(s, "rssi", 0),
+                            name=name,
+                            address=addr,
+                            rssi=getattr(s, "rssi", getattr(s, "Rssi", 0)),
                             is_callibri=True,
                         )
                     )
@@ -579,11 +590,13 @@ class CallibriService:
             time.sleep(5.0)
             scanner.stop()
             self._scanner = scanner
-            raw_list = [s for s in scanner.sensors() if s.address == address]
-            if not raw_list:
-                # try case-insensitive
-                raw_list = [s for s in scanner.sensors()
-                            if s.address.upper() == address.upper()]
+
+            def _get_addr(s: Any) -> str:
+                return getattr(s, "address", None) or getattr(s, "Address", "") or ""
+
+            raw_list = [s for s in scanner.sensors()
+                        if _get_addr(s).upper() == address.upper()]
+
             if not raw_list:
                 self._state = "error"
                 self._error_message = f"Sensor {address} not found. Please ensure it is powered on."
@@ -662,22 +675,21 @@ class CallibriService:
         if not self._sensor:
             return
         sensor = self._sensor
-
         try:
-            sensor.sampling_frequency = SamplingFrequency.FrequencyHz1000
+            if SamplingFrequency is not None:
+                sensor.sampling_frequency = SamplingFrequency.FrequencyHz1000
         except Exception as exc:
             _log.warning("Could not set sampling frequency: %s", exc)
         try:
-            sensor.gain = SensorGain.Gain12
+            if SensorGain is not None:
+                sensor.gain = SensorGain.Gain12
         except Exception as exc:
             _log.warning("Could not set gain: %s", exc)
         try:
-            sensor.data_offset = SensorDataOffset.DataOffset3
+            if SensorDataOffset is not None:
+                sensor.data_offset = SensorDataOffset.DataOffset3
         except Exception as exc:
             _log.warning("Could not set data offset: %s", exc)
-
-    #    if sensor.IsSupportedCommand(SensorCommand.StartSignal):
-    #        sensor.ExecCommand(SensorCommand.StartSignal)
 
     def start_streaming(self, session_start_ms: int | None = None) -> None:
         if not self._sensor or self._state != "connected":

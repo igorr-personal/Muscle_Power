@@ -1,9 +1,5 @@
 from __future__ import annotations  # <--- MUST BE LINE 1
 
-import sys
-print(f"==========================================")
-print(f"DEBUG: I am using this Python: {sys.executable}")
-print(f"==========================================")
 
 import streamlit as st
 import time
@@ -18,6 +14,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+
 
 from muscle_power.components.ui import (
     RED, inject_css, electrode_quality_indicator, fft_chart,
@@ -383,7 +380,7 @@ with st.sidebar:
                     _elapsed += 0.3
                     pct = min(int((_elapsed / _scan_timeout) * 100), 99)
                     _scan_bar.progress(pct, text=f"Scanning... {pct}%")
-                _t.join(timeout=2)
+                _t.join(timeout=10)
                 _scan_bar.progress(100, text="Scan complete")
                 time.sleep(0.3)
                 _scan_bar.empty()
@@ -398,6 +395,7 @@ with st.sidebar:
                         show_error_card(str(_exc))
                 else:
                     found_list = _scan_result
+                   
                     st.session_state.found_sensors = found_list
                     callibri_count = sum(1 for d in found_list if d.is_callibri)
                     if found_list:
@@ -465,10 +463,6 @@ with st.sidebar:
         # --- Find this line around line 465 ---
         elif svc.state == "connected":
     
-            # 1. ADD THE REFRESH HEARTBEAT FIRST
-            # This forces the UI to update every 100ms so the chart moves
-            from streamlit_autorefresh import st_autorefresh
-            st_autorefresh(interval=100, key="data_refresh")
 
             # 2. ADD THE CHART LOGIC HERE
             st.subheader("Live Muscle Power (Envelope)")
