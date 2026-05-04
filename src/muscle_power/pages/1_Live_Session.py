@@ -273,7 +273,7 @@ def _update_wave_buffers() -> None:
         if st.session_state["sim_mode"]:
             new_samples = _sim_frame_for_slot(sid, frame).tolist()
         else:
-            if sid == "red" and svc.state == "connected":
+            if svc.state == "connected":
                 raw_samples = svc.get_raw_samples(max_samples=_SIM_CHUNK)
                 new_samples = [s.raw_value for s in raw_samples[-_SIM_CHUNK:]]
             else:
@@ -737,7 +737,8 @@ if not st.session_state["sim_mode"]:
                     )
                     st.session_state.session_id = sid
                     st.session_state.recording = True
-                    svc.start_streaming(session_start_ms=int(time.time() * 1000))
+                    if not st.session_state.get("streaming", False):
+                        svc.start_streaming(session_start_ms=int(time.time() * 1000))
                     st.session_state.streaming = True
                     toast_success("Recording started!")
                 except SessionConflictError as exc:
@@ -753,7 +754,8 @@ if not st.session_state["sim_mode"]:
             elif tracker.state == "PAUSED":
                 if st.button(" Resume", use_container_width=True):
                     tracker.resume_session()
-                    svc.start_streaming()
+                    if not st.session_state.get("streaming", False):
+                        svc.start_streaming()
                     st.session_state.streaming = True
                     toast_success("Session resumed")
     with ctrl4:
@@ -807,6 +809,12 @@ with osc_c1:
         if st.button(" Start", use_container_width=True, type="primary",
                       help="Begin continuous waveform scrolling."):
             st.session_state["sig_display_running"] = True
+            if svc.state == "connected" and not st.session_state.get("streaming", False):
+                try:
+                    svc.start_streaming()
+                    st.session_state["streaming"] = True
+                except Exception as exc:
+                    st.error(f"Could not start streaming: {exc}")
             st.rerun()
     else:
         if st.button(" Stop", use_container_width=True,
@@ -1419,8 +1427,9 @@ def _oscilloscope_view() -> None:
 
     # Fragment self-loop — only this fragment reruns, not the full page
     if st.session_state.get("sig_display_running", False):
-        time.sleep(0.05)  # 20 fps
-        st.rerun()
+        if svc.state == "connected" or st.session_state.get("sim_mode", False):
+            time.sleep(0.5)
+            st.rerun()
 
 
 _oscilloscope_view()

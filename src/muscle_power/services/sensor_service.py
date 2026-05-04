@@ -628,6 +628,10 @@ class CallibriService:
             self._state = "error"
             self._error_message = f"Failed to connect to sensor: {exc}"
             raise SensorConnectionError(self._error_message) from exc
+        # ← ADD THESE 3 LINES RIGHT HERE
+        print(f"DEBUG sensor type: {type(sensor)}")
+        print(f"DEBUG sensor dir: {[x for x in dir(sensor) if 'signal' in x.lower() or 'data' in x.lower() or 'callibri' in x.lower()]}")
+        print(f"DEBUG sensor all attrs: {[x for x in dir(sensor) if not x.startswith('__')]}")
 
         self._sensor = sensor
         self._battery = sensor.batt_power
@@ -771,6 +775,7 @@ class CallibriService:
         now_ms = int(time.time() * 1000)
         base_ms = self._session_start_ms or now_ms
         try:
+            print(f"DEBUG signal: {type(data)} len={len(data) if hasattr(data, '__len__') else '?'} first={data[0] if data else 'empty'}")
             for packet in data:
                 samples = getattr(packet, "samples", [])
                 if not samples:
@@ -800,8 +805,9 @@ class CallibriService:
                     samples = getattr(packet, "samples", [])
                     value = samples[0] if samples else None
 
+                if value is None:
+                    continue
 
-                
                 fval = float(value)
             
                 # 3. SAVE TO BUFFER: This is what the Streamlit chart reads
