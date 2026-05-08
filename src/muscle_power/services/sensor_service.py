@@ -408,6 +408,9 @@ class CallibriService:
     """
 
     def __init__(self) -> None:
+        self._sig_packets = 0
+        self._sig_samples = 0
+        self._last_sig_ms = 0
         self._scanner: Any = None
         self._sensor: Any = None
         self._sensor_info: SensorInfoDTO | None = None
@@ -422,6 +425,23 @@ class CallibriService:
         self._session_start_ms: int | None = None
         self._error_message: str = ""
         self._raw_sensor_cache: dict[str, Any] = {}
+
+        # ---- Multi-channel support (up to 4) ----
+        self._raw_buffers: list[deque[SignalSample]] = [
+            deque(maxlen=MAX_SIGNAL_BUFFER) for _ in range(4)
+        ]
+        self._envelope_buffers: list[deque[SignalSample]] = [
+            deque(maxlen=MAX_ENVELOPE_BUFFER) for _ in range(4)
+        ]
+
+        # Backward-compatible aliases (existing UI reads these)
+        self._raw_buffer = self._raw_buffers[0]
+        self._envelope_buffer = self._envelope_buffers[0]
+
+        # Keep strong references to callbacks (avoid GC issues)
+        self._cb_signal = None
+        self._cb_envelope = None
+        self._cb_electrode = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -449,6 +469,16 @@ class CallibriService:
 
     def on_disconnect(self, cb: Callable[[], None]) -> None:
         self._on_disconnect_callbacks.append(cb)
+    
+    def stream_stats(self) -> dict:
+        return {
+            "sig_packets": self._sig_packets,
+            "sig_samples": self._sig_samples,
+            "last_sig_ms": self._last_sig_ms,
+            "electrode": self._electrode_state,
+            "state": self._state,
+            "battery": self._battery,
+        }
 
     # ------------------------------------------------------------------
     # BLE scanning
@@ -647,7 +677,14 @@ class CallibriService:
 
         sensor.sensorStateChanged = self._on_state_changed
         sensor.batteryChanged = self._on_battery_changed
-        sensor.callibriElectrodeStateChanged = self._on_electrode_state  # ← ADD THIS
+        
+        #Electrode callback name differs by SDK build; bind whichever exists
+        self._cb_electrode = self._on_electrode_state
+        if hasattr(sensor, "electrodeStateChanged"):
+            sensor.electrodeStateChanged = self._cb_electrode
+        elif hasattr(sensor, "callibriElectrodeStateChanged"):
+            sensor.callibriElectrodeStateChanged = self._cb_electrode
+
         log_action(_log, "sensor_connected", {
             "name": sensor.name,
             "address": sensor.address,
@@ -695,6 +732,7 @@ class CallibriService:
         except Exception as exc:
             _log.warning("Could not set data offset: %s", exc)
 
+    
     def start_streaming(self, session_start_ms: int | None = None) -> None:
         if not self._sensor or self._state != "connected":
             raise Exception("Sensor not connected")
@@ -702,16 +740,75 @@ class CallibriService:
         self._session_start_ms = session_start_ms or int(time.time() * 1000)
         sensor = self._sensor
 
-        # Registering with the correct 'callibri' prefix required by the SDK
-        if sensor.is_supported_feature(SensorFeature.Signal):
-            sensor.callibriElectrodeStateChanged = self._on_electrode_state
-            sensor.callibriSignalDataReceived = self._on_signal_data
+        # Keep strong references (avoid GC issues)
+        self._cb_signal = self._on_signal_data
+        self._cb_envelope = self._on_envelope_data
+        self._cb_electrode = self._on_electrode_state
 
-        if sensor.is_supported_feature(SensorFeature.Envelope):
-            sensor.callibriEnvelopeDataReceived = self._on_envelope_data
+        # Electrode callback (you already see this working)
+        try:
+            if hasattr(sensor, "electrodeStateChanged"):
+                sensor.electrodeStateChanged = self._cb_electrode
+            elif hasattr(sensor, "callibriElectrodeStateChanged"):
+                sensor.callibriElectrodeStateChanged = self._cb_electrode
+        except Exception as exc:
+            _log.warning("Failed to bind electrode callback: %s", exc)
 
-        if sensor.is_supported_command(SensorCommand.StartSignal):
-            sensor.exec_command(SensorCommand.StartSignal)
+        # --- Signal callback (critical) ---
+        bound_signal = False
+        try:
+            if hasattr(sensor, "set_signal_callbacks"):
+                sensor.set_signal_callbacks(self._cb_signal)
+                bound_signal = True
+            elif hasattr(sensor, "signalDataReceived"):
+                sensor.signalDataReceived = self._cb_signal
+                bound_signal = True
+            elif hasattr(sensor, "callibriSignalDataReceived"):
+                sensor.callibriSignalDataReceived = self._cb_signal
+                bound_signal = True
+        except Exception as exc:
+            _log.warning("Failed to bind signal callback: %s", exc)
+
+        # --- Envelope callback (optional) ---
+        try:
+            if hasattr(sensor, "set_envelope_callbacks"):
+                sensor.set_envelope_callbacks(self._cb_envelope)
+            elif hasattr(sensor, "envelopeDataReceived"):
+                sensor.envelopeDataReceived = self._cb_envelope
+            elif hasattr(sensor, "callibriEnvelopeDataReceived"):
+                sensor.callibriEnvelopeDataReceived = self._cb_envelope
+        except Exception as exc:
+            _log.warning("Failed to bind envelope callback: %s", exc)
+
+        # Start streaming
+        started = False
+        try:
+            if SensorCommand is not None and hasattr(sensor, "is_supported_command") and hasattr(sensor, "exec_command"):
+                if sensor.is_supported_command(SensorCommand.StartSignal):
+                    sensor.exec_command(SensorCommand.StartSignal)
+                    started = True
+                if hasattr(SensorCommand, "StartEnvelope") and sensor.is_supported_command(SensorCommand.StartEnvelope):
+                    sensor.exec_command(SensorCommand.StartEnvelope)
+        except Exception as exc:
+            _log.warning("StartSignal failed: %s", exc)
+
+        if not started:
+            try:
+                if hasattr(sensor, "start_signal"):
+                    sensor.start_signal()
+                    started = True
+            except Exception as exc:
+                _log.warning("start_signal() failed: %s", exc)
+
+        log_action(_log, "streaming_started", {"started": started, "bound_signal": bound_signal})
+
+        if not started:
+            raise SensorConnectionError("Streaming did not start (StartSignal failed)")
+        if not bound_signal:
+            _log.warning("Streaming started but signal callback was NOT bound (wrong callback name for this SDK build).")
+
+
+
 
 
     def stop_streaming(self) -> None:
@@ -719,14 +816,36 @@ class CallibriService:
         if not self._sensor:
             return
         sensor = self._sensor
+
+        # Stop commands
         try:
-            if sensor.is_supported_command(SensorCommand.StopSignal):
-                sensor.exec_command(SensorCommand.StopSignal)
-            if sensor.is_supported_command(SensorCommand.StopEnvelope):
-                sensor.exec_command(SensorCommand.StopEnvelope)
+            if SensorCommand is not None and hasattr(sensor, "is_supported_command") and hasattr(sensor, "exec_command"):
+                if sensor.is_supported_command(SensorCommand.StopSignal):
+                    sensor.exec_command(SensorCommand.StopSignal)
+                if hasattr(SensorCommand, "StopEnvelope") and sensor.is_supported_command(SensorCommand.StopEnvelope):
+                    sensor.exec_command(SensorCommand.StopEnvelope)
         except Exception as exc:
-            _log.warning("Error stopping signal: %s", exc)
+            _log.warning("Error stopping stream: %s", exc)
+
+        # Unregister callbacks (avoid accumulating handlers across reruns)
+        try:
+            if hasattr(sensor, "unset_signal_callbacks"):
+                sensor.unset_signal_callbacks()
+            if hasattr(sensor, "unset_envelope_callbacks"):
+                sensor.unset_envelope_callbacks()
+        except Exception:
+            pass
+
+        # Also clear property callbacks if those were used
+        for attr in ("signalDataReceived", "callibriSignalDataReceived", "envelopeDataReceived", "callibriEnvelopeDataReceived"):
+            if hasattr(sensor, attr):
+                try:
+                    setattr(sensor, attr, None)
+                except Exception:
+                    pass
+
         log_action(_log, "streaming_stopped")
+
 
     def disconnect(self) -> None:
         """Stop streaming and disconnect."""
@@ -746,22 +865,25 @@ class CallibriService:
     # Data access
     # ------------------------------------------------------------------
 
-    def get_raw_samples(self, max_samples: int | None = None) -> list[SignalSample]:
+    def get_raw_samples(self, max_samples: int | None = None, channel: int = 0) -> list[SignalSample]:
+        ch = max(0, min(3, int(channel)))
         with self._lock:
-            buf = list(self._raw_buffer)
+            buf = list(self._raw_buffers[ch])
         return buf[-max_samples:] if max_samples else buf
 
-    def get_envelope_samples(self, max_samples: int | None = None) -> list[SignalSample]:
+    def get_envelope_samples(self, max_samples: int | None = None, channel: int = 0) -> list[SignalSample]:
+        ch = max(0, min(3, int(channel)))
         with self._lock:
-            buf = list(self._envelope_buffer)
+            buf = list(self._envelope_buffers[ch])
         return buf[-max_samples:] if max_samples else buf
 
-    def get_current_power(self) -> float:
-        """Return latest envelope value (muscle power proxy) in volts."""
+    def get_current_power(self, channel: int = 0) -> float:
+        ch = max(0, min(3, int(channel)))
         with self._lock:
-            if self._envelope_buffer:
-                return float(self._envelope_buffer[-1].envelope_value or 0.0)
+            if self._envelope_buffers[ch]:
+                return float(self._envelope_buffers[ch][-1].envelope_value or 0.0)
         return 0.0
+
 
     def get_signal_quality(self) -> str:
         """Return current electrode contact state."""
@@ -771,59 +893,81 @@ class CallibriService:
     # Internal callbacks
     # ------------------------------------------------------------------
 
-    def _on_signal_data(self, sensor: Any, data: Any) -> None:
-        now_ms = int(time.time() * 1000)
-        base_ms = self._session_start_ms or now_ms
+    def _on_signal_data(self, *args) -> None:
         try:
-            print(f"DEBUG signal: {type(data)} len={len(data) if hasattr(data, '__len__') else '?'} first={data[0] if data else 'empty'}")
-            for packet in data:
-                samples = getattr(packet, "samples", [])
-                if not samples:
-                    # single-value packet
-                    val = getattr(packet, "sample", None) or packet
-                    samples = [val]
-                for i, value in enumerate(samples):
-                    if value is None:
-                        continue
-                    fval = float(value)
-                    if not (fval == fval) or abs(fval) == float("inf"):   # NaN / Inf guard
-                        continue
-                    ts = base_ms + i
-                    with self._lock:
-                        self._raw_buffer.append(SignalSample(timestamp_ms=ts, raw_value=fval))
+            if len(args) == 2:
+                _sensor, data = args
+            elif len(args) == 1:
+                data = args[0]
+            else:
+                return
+
+            self._sig_packets += 1
+            self._last_sig_ms = int(time.time() * 1000)
+
+            # data is usually a list/iterable of packets
+            for packet in (data or []):
+                samples = getattr(packet, "samples", None)
+
+                if samples is None:
+                    one = getattr(packet, "sample", None)
+                    samples = [one] if one is not None else [packet]
+
+                # count samples
+                try:
+                    self._sig_samples += len(samples)
+                except Exception:
+                    self._sig_samples += 1
+
+                # store only channel 0 into existing buffer
+                if samples and not isinstance(samples[0], (list, tuple)):
+                    base_ms = self._session_start_ms or self._last_sig_ms
+                    for i, value in enumerate(samples):
+                        if value is None:
+                            continue
+                        with self._lock:
+                            self._raw_buffer.append(
+                                SignalSample(timestamp_ms=base_ms + i, raw_value=float(value))
+                            )
         except Exception as exc:
             _log.warning("Signal callback error: %s", exc)
 
-    def _on_envelope_data(self, sensor: Any, data: Any) -> None:
-        now_ms = int(time.time() * 1000)
+
+
+    def _on_envelope_data(self, *args) -> None:
+        """
+        Works with both callback signatures:
+          - cb(sensor, data)
+          - cb(data)
+        """
         try:
-            # 'data' is typically a list of packets from the SDK
-            for packet in data:
-                # 1. FIX: Use PascalCase "Sample" to match the SDK
+            if len(args) == 2:
+                _sensor, data = args
+            elif len(args) == 1:
+                data = args[0]
+            else:
+                return
+
+            now_ms = int(time.time() * 1000)
+
+            for packet in (data or []):
                 value = getattr(packet, "sample", None)
                 if value is None:
-                    samples = getattr(packet, "samples", [])
-                    value = samples[0] if samples else None
+                    samples = getattr(packet, "samples", None)
+                    if samples:
+                        value = samples[0] if not isinstance(samples[0], (list, tuple)) else samples[0][0]
 
                 if value is None:
                     continue
 
                 fval = float(value)
-            
-                # 3. SAVE TO BUFFER: This is what the Streamlit chart reads
-                # We save the relative time (ms) and the float value
                 with self._lock:
-                    self._envelope_buffer.append(SignalSample(
-                        timestamp_ms=now_ms,
-                        raw_value=0.0,
-                        envelope_value=fval,
-                    ))
-            
-            # Optional: Debug print to see if numbers are moving in the terminal
-            # print(f"DEBUG: Envelope value received: {fval}")
+                    self._envelope_buffer.append(
+                        SignalSample(timestamp_ms=now_ms, raw_value=0.0, envelope_value=fval)
+                )
 
-        except Exception as e:
-            print(f"Error in envelope callback: {e}")
+        except Exception as exc:
+            _log.warning("Envelope callback error: %s", exc)
 
     def _on_state_changed(self, sensor: Any, state: Any) -> None:
         state_str = str(state)

@@ -274,8 +274,16 @@ def _update_wave_buffers() -> None:
             new_samples = _sim_frame_for_slot(sid, frame).tolist()
         else:
             if svc.state == "connected":
-                raw_samples = svc.get_raw_samples(max_samples=_SIM_CHUNK)
+                ch_map = {"red": 0, "blue": 1, "green": 2, "white": 3}
+                ch_idx = ch_map.get(sid, 0)
+
+                raw_samples = svc.get_raw_samples(max_samples=_SIM_CHUNK, channel=ch_idx)
                 new_samples = [s.raw_value for s in raw_samples[-_SIM_CHUNK:]]
+                
+                # If no samples arrived yet, draw a flat baseline
+                if not new_samples:
+                    new_samples = [0.0] * _SIM_CHUNK
+
             else:
                 new_samples = [0.0] * _SIM_CHUNK
         buf.extend(new_samples)
@@ -702,6 +710,13 @@ if not st.session_state["sim_mode"] and svc.state != "connected":
 # ---------------------------------------------------------------------------
 # Session recording controls (real sensor only)
 # ---------------------------------------------------------------------------
+
+stats = svc.stream_stats()
+st.caption(
+    f"stream: packets={stats['sig_packets']} samples={stats['sig_samples']} "
+    f"last={stats['last_sig_ms']} electrode={stats['electrode']} battery={stats['battery']}"
+)
+
 if not st.session_state["sim_mode"]:
     st.subheader("Session Recording")
     ctrl1, ctrl2, ctrl3, ctrl4 = st.columns(4)
